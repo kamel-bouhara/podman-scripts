@@ -1,0 +1,35 @@
+#!/bin/bash
+
+main () {
+  set -x
+  if [ -n "${http_proxy}" ]; then
+    netloc="${http_proxy}"
+    # Remove leading http://, if present.
+    netloc=${netloc##http://}
+    # Remove path (i.e., '/' as well as anything after it), if any.
+    netloc=${netloc%%/*}
+
+    host=${netloc%%:*}
+    port=${netloc##*:}
+
+    # Generate maven proxy settings.
+    mkdir -p ${HOME}/.m2
+    cat > ${HOME}/.m2/settings.xml << EOF
+<settings>
+ <proxies>
+  <proxy>
+   <id>system proxy</id>
+   <active>true</active>
+   <protocol>http</protocol>
+   <host>${host}</host>
+   <port>${port}</port>
+  </proxy>
+ </proxies>
+</settings>
+EOF
+  fi
+
+  exec "$@"
+}
+
+main "$@"

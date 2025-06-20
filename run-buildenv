@@ -1,0 +1,101 @@
+#!/bin/bash -vx
+
+ctr_image_name="yocto-buildenv:latest"
+
+print_usage () {
+  local podman_version
+  podman_version=$(podman --version 2>/dev/null | sed -e 's/^.*version *//')
+  podman_version=${podman_version:-latest}
+
+  cat << EOF
+Run a command in an Yocto development environment container.
+
+Usage: run-devenv [PODMAN_OPTIONS]... [--] [COMMAND [ARGS]...]
+
+Example podman options: --rm, --volume etc.
+For more about podman options, see:
+- man page: man podman-run
+- Docs: https://docs.podman.io/en/v${podman_version}/markdown/podman-run.1.html
+
+Influential environment variables:
+- OpenSSH: SSH_AUTH_SOCK
+- Proxy: http_proxy, https_proxy, HTTP_PROXY, HTTPS_PROXY
+- Workspace: YOCTO_WORKDIR
+
+Example:
+  Run an interactive shell (delete the container on exit):
+    run-devenv --rm -it -- bash -i
+EOF
+}
+
+check_dbus_systemd () {
+  local svc="org.freedesktop.systemd1"
+  if ! busctl --user status "$svc" > /dev/null 2>&1; then
+    echo "Error: Cannot find $svc on session bus. Check DBUS_SESSION_BUS_ADDRESS." >&2
+    exit 1
+  fi
+}
+
+main () {
+  local -a podman_args
+  local dashdash=false
+
+  if [ $# -eq 0 ] || [ "$1" = "--help" ]; then
+    print_usage
+    exit 0
+  fi
+
+  check_dbus_systemd
+
+  export BB_NUMBER_THREADS="${BB_NUMBER_THREADS:-16}"
+  SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+  podman_args=(
+    --init
+    --user 30000:30000
+    --uidmap 0:1:30000
+    --uidmap 30000:0:1
+    --uidmap 30001:30001:35536
+    --gidmap 0:1:30000
+    --gidmap 30000:0:1
+    --gidmap 30001:30001:35536
+    --env TERM
+    --env BB_NUMBER_THREADS
+    --privileged
+    --pids-limit=0
+  )
+
+  # Mount SSH agent socket if available
+  if [ -n "${SSH_AUTH_SOCK:-}" ]; then
+    podman_args+=(
+      --volume "$SSH_AUTH_SOCK:/run/ssh-auth.sock"
+      --env SSH_AUTH_SOCK=/run/ssh-auth.sock
+    )
+  fi
+
+  # Mount Yocto workdir if provided
+  if [ -n "${YOCTO_WORKDIR:-}" ]; then
+    podman_args+=(
+      --volume "$YOCTO_WORKDIR:/home/yocto/"
+      --env YOCTO_WORKDIR="/home/yocto"
+      --workdir "/home/yocto"
+    )
+  fi
+
+  # Collect podman options until --
+  while [ $# -gt 0 ]; do
+    if [ "$1" = "--" ]; then
+      dashdash=true
+      shift
+      break
+    else
+      podman_args+=("$1")
+      shift
+    fi
+  done
+
+  # Remaining args are command to run inside container
+  exec podman container run "${podman_args[@]}" "$ctr_image_name" "$@"
+}
+
+main "$@"
