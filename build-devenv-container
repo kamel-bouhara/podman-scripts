@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-
-container_base_distro=ubuntu:25.04
+container_base_distro=ubuntu:24.04
 target=yocto-buildenv
 
 on_exit () {
@@ -21,7 +20,6 @@ buildah_run () {
 print_usage () {
   cat << EOF
 Usage: build-devenv-container OPTIONS...
-
 Build the $target container, intended for application development
 (build, tests, code coverage etc.) and yocto builds.
 
@@ -34,7 +32,6 @@ EOF
 
 parse_args () {
   declare parsed
-
   # Parse options with getopt
   if ! parsed=$(getopt -o j: --long help,jobs: -n "$0" -- "$@"); then
     print_usage
@@ -64,6 +61,7 @@ parse_args () {
         exit 1
         ;;
     esac
+    shift
   done
 }
 
@@ -73,17 +71,13 @@ main () {
 
   this_script=$(readlink -fv "$0")
   this_dir=$(dirname "$this_script")
-
   ctr=""
 
   declare jobs
   declare default_jobs=8
-
   default_jobs=$(nproc)
   : ${default_jobs:=8}
-
   jobs="${default_jobs}"
-
   parse_args "$@"
 
   ctr=$(buildah from --name "$target" "$container_base_distro")
@@ -92,12 +86,10 @@ main () {
   fi
 
   packages=(
-	  build-essential chrpath cpio debianutils diffstat file gawk gcc git iputils-ping libacl1
-	  liblz4-tool locales python3 python3-git python3-jinja2 python3-pexpect python3-pip
-	  python3-subunit socat texinfo unzip wget xz-utils zstd build-essential chrpath cpio
-	  debianutils diffstat file gawk gcc git iputils-ping libacl1 liblz4-tool locales python3
-	  python3-git python3-jinja2 python3-pexpect python3-pip python3-subunit socat texinfo
-	  unzip wget xz-utils zstd vim tig tmux openssh-client
+    build-essential chrpath cpio debianutils diffstat file gawk gcc git iputils-ping libacl1
+    liblz4-tool locales python3 python3-git python3-jinja2 python3-pexpect python3-pip
+    python3-subunit socat texinfo unzip wget xz-utils zstd vim tig tmux openssh-client
+    software-properties-common ca-certificates curl
   )
 
   apt_env=(DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC)
@@ -105,32 +97,44 @@ main () {
     apt_env+=(http_proxy="${APT_HTTP_PROXY}")
   fi
 
-  # XXX: Disable security.ubuntu.com to work around proxy issue.
+  # Convert to old-style sources.list for easier management and proxy compatibility
+  buildah_run bash -c 'cat > /etc/apt/sources.list << EOF
+deb http://fr.archive.ubuntu.com/ubuntu/ noble main restricted universe multiverse
+deb http://fr.archive.ubuntu.com/ubuntu/ noble-updates main restricted universe multiverse
+deb http://fr.archive.ubuntu.com/ubuntu/ noble-backports main restricted universe multiverse
+deb http://fr.archive.ubuntu.com/ubuntu/ noble-security main restricted universe multiverse
+EOF'
 
-  buildah_run sed -i -e 's/^\([^#].*security.ubuntu.com\)/# \1/' /etc/apt/sources.list
-  buildah_run sh -c "echo deb http://fr.archive.ubuntu.com/ubuntu/ focal-security main restricted universe >> /etc/apt/sources.list"
+  # Remove DEB822 format file if it exists
+  buildah_run rm -f /etc/apt/sources.list.d/ubuntu.sources
 
   buildah_run env "${apt_env[@]}" apt-get update
   buildah_run env "${apt_env[@]}" apt-get dist-upgrade --no-install-recommends -y
   buildah_run env "${apt_env[@]}" apt-get install -y locales tzdata
-
   buildah_run localedef -i en_US -c -f UTF-8 -A /usr/share/locale/locale.alias en_US.UTF-8
-
   buildah config --env LANG=en_US.UTF-8 "$ctr"
-
   buildah_run env "${apt_env[@]}" apt-get install --no-install-recommends -y "${packages[@]}"
+
+  # Add deadsnakes PPA for Python 3.11
+  buildah_run env "${apt_env[@]}" add-apt-repository -y ppa:deadsnakes/ppa
+  buildah_run env "${apt_env[@]}" apt-get update
+
+  # Install Python 3.11
+  buildah_run env "${apt_env[@]}" apt-get install --no-install-recommends -y \
+    python3.11 \
+    python3.11-venv \
+    python3.11-dev \
+    python3.11-distutils
+
   buildah_run apt-get clean
 
   # Clean-up
   buildah_run sh -c "rm -rf /var/lib/apt/lists/*"
-  # TODO: /tmp/* /var/tmp/* /root/.cache"
 
   groupname=yocto
   username=yocto
-
   buildah_run groupadd -g 30000 $groupname
   buildah_run useradd -u 30000 -g 30000 -m -s /bin/bash $username
-
   home=/home/$username
 
   # sudo for normal user accounts.
@@ -138,8 +142,14 @@ main () {
   buildah add --chmod 0400 "$ctr" "$this_dir/sudoers-all" /etc/sudoers.d/all
   buildah add --chmod 0400 "$ctr" "$this_dir/sudoers-preserve-proxy" /etc/sudoers.d/preserve-proxy
 
-  unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
-  buildah_run python3 -m pip install --break-system-packages "kas==5.1"
+  # Install Python packages using Python 3.11
+  buildah_run python3.11 -m pip install --break-system-packages \
+    "kas==5.1" \
+    "pydantic>=1.10,<2.0" \
+    "psutil"
+
+  # Set Python 3.11 as default python3
+  buildah_run update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
 
   buildah config \
     --user $username \
